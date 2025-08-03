@@ -62,18 +62,22 @@ class RealESRGAN:
         self.model.eval()
         self.model.to(self.device)
         
-    @torch.cuda.amp.autocast()
-    def predict(self, lr_image, batch_size=4, patches_size=192,
-                padding=24, pad_size=15):
+    @torch.amp.autocast('cuda')
+    def predict(self, lr_image: np.ndarray, batch_size=4, patches_size=192,
+                padding=24, pad_size=15) -> np.ndarray:
         scale = self.scale
         device = self.device
-        lr_image = np.array(lr_image)
+        output_dtype = lr_image.dtype
+        div_factor = 255 if output_dtype == np.uint8 else 65535
+        if lr_image.shape[2] == 4:
+            lr_image = lr_image[:, :, :3]
         lr_image = pad_reflect(lr_image, pad_size)
+        
 
         patches, p_shape = split_image_into_overlapping_patches(
             lr_image, patch_size=patches_size, padding_size=padding
         )
-        img = torch.FloatTensor(patches/255).permute((0,3,1,2)).to(device).detach()
+        img = torch.FloatTensor(patches/div_factor).permute((0,3,1,2)).to(device).detach()
 
         with torch.no_grad():
             res = self.model(img[0:batch_size])
@@ -89,8 +93,7 @@ class RealESRGAN:
             np_sr_image, padded_image_shape=padded_size_scaled, 
             target_shape=scaled_image_shape, padding_size=padding * scale
         )
-        sr_img = (np_sr_image*255).astype(np.uint8)
+        sr_img = (np_sr_image*div_factor).astype(output_dtype)
         sr_img = unpad_image(sr_img, pad_size*scale)
-        sr_img = Image.fromarray(sr_img)
 
         return sr_img

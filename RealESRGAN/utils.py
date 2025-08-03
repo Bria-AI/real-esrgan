@@ -7,7 +7,7 @@ import io
 def pad_reflect(image, pad_size):
     imsize = image.shape
     height, width = imsize[:2]
-    new_img = np.zeros([height+pad_size*2, width+pad_size*2, imsize[2]]).astype(np.uint8)
+    new_img = np.zeros([height+pad_size*2, width+pad_size*2, imsize[2]]).astype(image.dtype)
     new_img[pad_size:-pad_size, pad_size:-pad_size, :] = image
     
     new_img[0:pad_size, pad_size:-pad_size, :] = np.flip(image[0:pad_size, :, :], axis=0) #top
@@ -19,23 +19,6 @@ def pad_reflect(image, pad_size):
 
 def unpad_image(image, pad_size):
     return image[pad_size:-pad_size, pad_size:-pad_size, :]
-
-
-def process_array(image_array, expand=True):
-    """ Process a 3-dimensional array into a scaled, 4 dimensional batch of size 1. """
-    
-    image_batch = image_array / 255.0
-    if expand:
-        image_batch = np.expand_dims(image_batch, axis=0)
-    return image_batch
-
-
-def process_output(output_tensor):
-    """ Transforms the 4-dimensional output tensor into a suitable image format. """
-    
-    sr_img = output_tensor.clip(0, 1) * 255
-    sr_img = np.uint8(sr_img)
-    return sr_img
 
 
 def pad_patch(image_patch, padding_size, channel_last=True):

@@ -7,8 +7,7 @@ import cv2
 from huggingface_hub import hf_hub_download
 
 from .rrdbnet_arch import RRDBNet
-from .utils import pad_reflect, split_image_into_overlapping_patches, stich_together, \
-                   unpad_image
+from .utils import padded_index
 
 
 HF_MODELS = {
@@ -65,35 +64,46 @@ class RealESRGAN:
     @torch.amp.autocast('cuda')
     def predict(self, lr_image: np.ndarray, batch_size=4, patches_size=192,
                 padding=24, pad_size=15) -> np.ndarray:
-        scale = self.scale
-        device = self.device
-        output_dtype = lr_image.dtype
-        div_factor = 255 if output_dtype == np.uint8 else 65535
+        """Pads, tiles, stitches and quantises on self.device; output identical to the previous numpy version."""
+        scale, device = self.scale, self.device
+        out_dtype = lr_image.dtype
+        div_factor = 255 if out_dtype == np.uint8 else 65535
         if lr_image.shape[2] == 4:
             lr_image = lr_image[:, :, :3]
-        lr_image = pad_reflect(lr_image, pad_size)
-        
 
-        patches, p_shape = split_image_into_overlapping_patches(
-            lr_image, patch_size=patches_size, padding_size=padding
-        )
-        img = torch.FloatTensor(patches/div_factor).permute((0,3,1,2)).to(device).detach()
+        # int32 holds uint16 values exactly; avoids uint16 torch tensors
+        img = torch.from_numpy(
+            np.ascontiguousarray(lr_image, dtype=np.uint8 if out_dtype == np.uint8 else np.int32)
+        ).to(device)
+        h, w = img.shape[:2]
+        ri = padded_index(h, pad_size, patches_size, padding, device)
+        ci = padded_index(w, pad_size, patches_size, padding, device)
+        padded = img[ri][:, ci].permute(2, 0, 1)
+        tile = patches_size + 2 * padding
+        patches = padded.unfold(1, tile, patches_size).unfold(2, tile, patches_size)
+        n_rows, n_cols = patches.shape[1], patches.shape[2]
+        patches = patches.permute(1, 2, 0, 3, 4).reshape(n_rows * n_cols, 3, tile, tile)
 
+        # float64 divide then float32 matches numpy's patches/div_factor -> FloatTensor
+        q_dtype = torch.uint8 if out_dtype == np.uint8 else torch.int32
+        quantised = []
         with torch.no_grad():
-            res = self.model(img[0:batch_size])
-            for i in range(batch_size, img.shape[0], batch_size):
-                res = torch.cat((res, self.model(img[i:i+batch_size])), 0)
+            for i in range(0, patches.shape[0], batch_size):
+                # clone (not contiguous) gives the old channels-last strides, incl. for a size-1
+                # batch, so torch conv backends round identically
+                batch = (patches[i : i + batch_size].double() / div_factor).float()
+                batch = batch.clone(memory_format=torch.channels_last)
+                res = self.model(batch).clamp_(0, 1)
+                quantised.append((res.double() * div_factor).to(q_dtype))
+        tiles = torch.cat(quantised, 0)
 
-        sr_image = res.permute((0,2,3,1)).clamp_(0, 1).cpu()
-        np_sr_image = sr_image.numpy()
-
-        padded_size_scaled = tuple(np.multiply(p_shape[0:2], scale)) + (3,)
-        scaled_image_shape = tuple(np.multiply(lr_image.shape[0:2], scale)) + (3,)
-        np_sr_image = stich_together(
-            np_sr_image, padded_image_shape=padded_size_scaled, 
-            target_shape=scaled_image_shape, padding_size=padding * scale
-        )
-        sr_img = (np_sr_image*div_factor).astype(output_dtype)
-        sr_img = unpad_image(sr_img, pad_size*scale)
-
-        return sr_img
+        crop = padding * scale
+        tiles = tiles[:, :, crop:-crop, crop:-crop]
+        q = tiles.shape[-1]
+        out = tiles.reshape(n_rows, n_cols, 3, q, q).permute(0, 3, 1, 4, 2)
+        out = out.reshape(n_rows * q, n_cols * q, 3)
+        n_h = (h + 2 * pad_size) * scale
+        n_w = (w + 2 * pad_size) * scale
+        p = pad_size * scale
+        out = out[:n_h, :n_w][p:-p, p:-p].contiguous().cpu().numpy()
+        return out.astype(out_dtype, copy=False)

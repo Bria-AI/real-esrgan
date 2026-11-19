@@ -42,9 +42,19 @@ class _ConvUpscale(torch.nn.Module):
 _STAND_INS = [_Upscale, _ConvUpscale]
 
 
-def _make_model(stand_in, scale: int) -> RealESRGAN:
-    model = RealESRGAN("cpu", scale=scale)
-    model.model = stand_in(scale).eval()
+# CUDA divides by a scalar via its reciprocal, so rounding there needs its own run.
+_DEVICES = [
+    "cpu",
+    pytest.param(
+        "cuda",
+        marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA"),
+    ),
+]
+
+
+def _make_model(stand_in, scale: int, device: str) -> RealESRGAN:
+    model = RealESRGAN(device, scale=scale)
+    model.model = stand_in(scale).eval().to(device)
     return model
 
 
@@ -54,6 +64,7 @@ def _make_frame(h: int, w: int, channels: int, dtype) -> np.ndarray:
     return rng.integers(0, high, size=(h, w, channels)).astype(dtype)
 
 
+@torch.amp.autocast("cuda")  # as the old predict was
 def _numpy_predict(
     model, lr_image, batch_size=4, patches_size=192, padding=24, pad_size=15
 ):
@@ -91,15 +102,16 @@ def _numpy_predict(
 
 
 @pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize("device", _DEVICES)
 @pytest.mark.parametrize("stand_in", _STAND_INS)
 class TestPredict:
     @pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
     @pytest.mark.parametrize("scale", [2, 4])
     @pytest.mark.parametrize("channels", [3, 4])
     def test_predict_on_dtype_scale_channels_should_match_numpy_reference(
-        self, stand_in, dtype, scale, channels
+        self, stand_in, device, dtype, scale, channels
     ):
-        model = _make_model(stand_in, scale)
+        model = _make_model(stand_in, scale, device)
         frame = _make_frame(100, 130, channels, dtype)
 
         expected = _numpy_predict(model, frame)
@@ -117,19 +129,32 @@ class TestPredict:
             (250, 400),  # non-multiple of patch size
         ],
     )
-    def test_predict_on_frame_size_should_match_numpy_reference(self, stand_in, h, w):
-        model = _make_model(stand_in, 2)
+    def test_predict_on_frame_size_should_match_numpy_reference(
+        self, stand_in, device, h, w
+    ):
+        model = _make_model(stand_in, 2, device)
         frame = _make_frame(h, w, 3, np.uint8)
 
         assert np.array_equal(model.predict(frame), _numpy_predict(model, frame))
 
+    @pytest.mark.parametrize(
+        "batch_size", [4, 5]
+    )  # 6 tiles: a tail of 2, and a size-1 tail
     def test_predict_on_batch_size_not_dividing_tile_count_should_match_numpy_reference(
-        self, stand_in
+        self, stand_in, device, batch_size
     ):
-        model = _make_model(stand_in, 2)
+        model = _make_model(stand_in, 2, device)
         frame = _make_frame(300, 400, 3, np.uint8)
 
         assert np.array_equal(
-            model.predict(frame, batch_size=3),
-            _numpy_predict(model, frame, batch_size=3),
+            model.predict(frame, batch_size=batch_size),
+            _numpy_predict(model, frame, batch_size=batch_size),
         )
+
+    def test_predict_on_frame_smaller_than_pad_size_should_raise_value_error(
+        self, stand_in, device
+    ):
+        model = _make_model(stand_in, 2, device)
+
+        with pytest.raises(ValueError):
+            model.predict(_make_frame(10, 60, 3, np.uint8))

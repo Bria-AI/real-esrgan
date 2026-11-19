@@ -70,6 +70,9 @@ class RealESRGAN:
         div_factor = 255 if out_dtype == np.uint8 else 65535
         if lr_image.shape[2] == 4:
             lr_image = lr_image[:, :, :3]
+        # An out-of-range gather on CUDA is a device assert that breaks the CUDA context for the whole process
+        if min(lr_image.shape[:2]) < pad_size:
+            raise ValueError(f"frame {lr_image.shape[:2]} is smaller than pad_size={pad_size}")
 
         # int32 holds uint16 values exactly; avoids uint16 torch tensors
         img = torch.from_numpy(
@@ -96,6 +99,7 @@ class RealESRGAN:
                 res = self.model(batch).clamp_(0, 1)
                 quantised.append((res.double() * div_factor).to(q_dtype))
         tiles = torch.cat(quantised, 0)
+        del quantised  # free the per-batch tiles before the crop copies
 
         crop = padding * scale
         tiles = tiles[:, :, crop:-crop, crop:-crop]

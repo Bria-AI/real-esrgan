@@ -114,3 +114,18 @@ def stich_together(patches, padded_image_shape, target_shape, padding_size=4):
         ] = patches[i]
         col += 1
     return complete_image[0: target_shape[0], 0: target_shape[1], :]
+
+
+def symmetric_index(n: int, pad: int, device) -> torch.Tensor:
+    """Source indices for pad_reflect's edge-inclusive mirror padding along one axis."""
+    ar = torch.arange(n, device=device)
+    return torch.cat((ar[:pad].flip(0), ar, ar[n - pad :].flip(0)))
+
+
+def padded_index(n: int, pad_size: int, patch_size: int, padding: int, device) -> torch.Tensor:
+    """Source indices for the full pad chain: mirror, edge-extend to a patch multiple, edge-pad."""
+    sym = symmetric_index(n, pad_size, device)
+    n_sym = n + 2 * pad_size
+    n_ext = n_sym + (patch_size - n_sym % patch_size) % patch_size
+    j = torch.arange(n_ext + 2 * padding, device=device) - padding
+    return sym[j.clamp(0, n_sym - 1)]
